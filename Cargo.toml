@@ -1,0 +1,23 @@
+[package]
+name = "pcap-tools"
+version = "0.1.0"
+authors = ["Pierre Chifflier <chifflier@wzdftpd.net>"]
+
+[[bin]]
+name = "pcap-rewrite"
+path = "src/pcap-rewrite/main.rs"
+
+[[bin]]
+name = "pcap-info"
+path = "src/pcap-info/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nom = "4.0"
+pcap-parser = "0.2"
+
+[dependencies.clap]
+version = "2"
+default-features = false
