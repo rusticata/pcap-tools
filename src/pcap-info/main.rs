@@ -37,10 +37,6 @@ fn main() {
              .help("Input file name")
              .required(true)
              .index(1))
-        .arg(Arg::with_name("OUTPUT")
-             .help("Output file name")
-             .required(true)
-             .index(2))
         .get_matches();
 
     let input_filename = matches.value_of("INPUT").unwrap();
