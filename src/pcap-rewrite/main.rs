@@ -1,5 +1,5 @@
 extern crate clap;
-use clap::{Arg,App};
+use clap::{Arg,App,crate_version};
 
 use std::error::Error;
 use std::fs::File;
@@ -31,7 +31,7 @@ fn main() {
     };
 
     let matches = App::new("Pcap rewrite tool")
-        .version("0.1")
+        .version(crate_version!())
         .author("Pierre Chifflier")
         .about("Rewrite Pcap file from one format to another")
         .arg(Arg::with_name("verbose")
