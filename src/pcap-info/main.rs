@@ -1,30 +1,79 @@
 extern crate clap;
 use clap::{Arg,App,crate_version};
 
+extern crate circular;
+
+use circular::Buffer;
+use std::io::Read;
+
+use std::cmp::min;
 use std::error::Error;
 use std::fs::File;
-use std::io::prelude::*;
 use std::path::Path;
+
+use std::fmt;
 
 extern crate pcap_parser;
 
 use pcap_parser::*;
 
 extern crate nom;
-// use nom::HexDisplay;
+use nom::HexDisplay;
+use nom::{Needed,Offset};
+
+#[derive(Debug,PartialEq,Eq)]
+enum PcapType {
+    Unknown,
+    Pcap,
+    PcapNG
+}
 
 #[derive(Debug)]
 struct Stats {
+    pcap_type: PcapType,
+    major: u16,
+    minor: u16,
     num_packets: u32,
     num_bytes: u64,
+    link_type: Linktype,
+    shb_hardware: Option<String>,
+    shb_os: Option<String>,
+    shb_userappl: Option<String>,
+}
+
+impl Stats {
+    pub fn new() -> Stats {
+        Stats{
+            pcap_type: PcapType::Unknown,
+            major: 0,
+            minor: 0,
+            num_packets: 0,
+            num_bytes: 0,
+            link_type: Linktype(0),
+            shb_hardware: None,
+            shb_os: None,
+            shb_userappl: None,
+        }
+    }
+}
+
+impl fmt::Display for Stats {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let unknown = String::from("<Unknown>");
+        fmt.write_str("Stats:\n")?;
+        writeln!(fmt, "    Format: {:?}", self.pcap_type)?;
+        writeln!(fmt, "    Version: {}.{}", self.major, self.minor)?;
+        writeln!(fmt, "    Num packets: {}", self.num_packets)?;
+        writeln!(fmt, "    Num bytes: {}", self.num_bytes)?;
+        writeln!(fmt, "    Link type: {}", self.link_type)?;
+        writeln!(fmt, "    Hardware: {}", self.shb_hardware.as_ref().unwrap_or(&unknown))?;
+        writeln!(fmt, "    OS: {}", self.shb_os.as_ref().unwrap_or(&unknown))?;
+        writeln!(fmt, "    Application: {}", self.shb_userappl.as_ref().unwrap_or(&unknown))?;
+        writeln!(fmt, "")
+    }
 }
 
 fn main() {
-    let mut stats = Stats{
-        num_packets: 0,
-        num_bytes: 0,
-    };
-
     let matches = App::new("Pcap info tool")
         .version(crate_version!())
         .author("Pierre Chifflier")
@@ -60,99 +109,225 @@ fn main() {
     println!("File name: {}", input_filename);
     println!("File size: {}", metadata.len());
 
+    let res = pcap_get_stats(&mut file);
+
+    if let Ok(stats) = res {
+        if verbose {
+            println!("{}", stats);
+            println!("Done.");
+        }
+    }
+
     let mut buffer = Vec::new();
     match file.read_to_end(&mut buffer) {
         Err(why) => panic!("couldn't open {}: {}", display,
                            why.description()),
         Ok(_) => (),
     };
+}
 
-    // try pcap first
-    match PcapCapture::from_file(&buffer) {
-        Ok(capture) => {
-            println!("Format: PCAP");
-            println!("Linktype: {:?}", capture.get_datalink());
-            println!("Snaplen: {}", capture.header.snaplen);
-            println!("Version: {}.{}", capture.header.version_major, capture.header.version_minor);
-            println!("{:?}", capture.header);
-            for _packet in capture.iter_packets() {
-                stats.num_packets += 1;
-            }
-        },
-        _ => (),
-    }
+fn pcap_get_stats<R:Read>(f: &mut R) -> Result<Stats,&'static str> {
+    let mut stats = Stats::new();
 
-    // try pcapng
-    // XXX do that only if pcap failed
-    match parse_pcapng(&buffer) {
-        Ok((rem, ref mut capture)) => {
-            println!("Format: PCAPNG");
-            println!("Num sections: {}", capture.sections.len());
-            for (snum,section) in capture.sections.iter().enumerate() {
-                println!("Section {}:", snum);
-                for (inum,interface) in section.interfaces.iter().enumerate() {
-                    println!("    Interface {}:", inum);
-                    println!("        Linktype: {:?}", interface.header.linktype);
-                    println!("        Snaplen: {}", interface.header.snaplen);
-                    println!("        if_tsresol: {}", interface.if_tsresol);
-                    println!("        if_tsoffset: {}", interface.if_tsoffset);
-                    println!("        Num blocks: {}", interface.blocks.len());
-                    println!("        Num packets: {}", interface.iter_packets().count());
-                }
-            //     println!("{:?}", section);
-            }
-            for _packet in capture.iter_packets() {
-                // println!("packet: {:?}", packet);
-                // println!("packet: caplen={} len={} ts={}.{}", packet.header.caplen, packet.header.len, packet.header.ts_sec, packet.header.ts_usec);
-                stats.num_packets += 1;
-            }
-            // XXX checks
-            // 0. sections must be non-empty, and all sections must have at least one interface
-            for (snum,s) in capture.sections.iter().enumerate() {
-                if s.interfaces.is_empty() {
-                    println!("CRITICAL: empty section {}", snum);
+    let mut capacity = 16384;
+    let buffer_max_size = 65536;
+    let mut b = Buffer::with_capacity(capacity);
+    let sz = f.read(b.space()).expect("should write");
+    b.fill(sz);
+    // println!("write {:#?}", sz);
+
+    let length = {
+        // parse the section header
+        let res = parse_sectionheaderblock(b.data());
+
+        // `available_data()` returns how many bytes can be read from the buffer
+        // `data()` returns a `&[u8]` of the current data
+        // `to_hex(_)` is a helper method of `nom::HexDisplay` to print a hexdump of a byte slice
+        // println!("data({} bytes):\n{}", b.available_data(), (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
+        if let Ok((remaining, h)) = res {
+            // println!("parsed header: {:?}", h);
+            stats.pcap_type = PcapType::PcapNG;
+            stats.major = h.major_version;
+            stats.minor = h.minor_version;
+            for opt in h.options {
+                match opt.code {
+                    OptionCode::ShbHardware => {
+                        let s = String::from_utf8_lossy(opt.value);
+                        stats.shb_hardware = Some(String::from(s));
+                    },
+                    OptionCode::ShbOs => {
+                        let s = String::from_utf8_lossy(opt.value);
+                        stats.shb_os = Some(String::from(s));
+                    },
+                    OptionCode::ShbUserAppl => {
+                        let s = String::from_utf8_lossy(opt.value);
+                        stats.shb_userappl = Some(String::from(s));
+                    },
+                    _ => ()
                 }
             }
-            // 1. all interfaces in a section should have same linktype
-            for (snum,s) in capture.sections.iter().enumerate() {
-                let link0 = s.interfaces[0].header.linktype;
-                let res = s.interfaces.iter().find(|x| x.header.linktype != link0);
-                if let Some(interface) = res {
-                    println!("CRITICAL: one interface has different linktype ({} vs {}) from first interface in section {}", interface.header.linktype, link0, snum);
+
+            // `offset()` is a helper method of `nom::Offset` that can compare two slices and indicate
+            // how far they are from each other. The parameter of `offset()` must be a subset of the
+            // original slice
+            b.data().offset(remaining)
+        } else if let Ok((remaining,h)) = pcap::parse_pcap_header(b.data()) {
+            stats.pcap_type = PcapType::Pcap;
+            stats.link_type = Linktype(h.network);
+            stats.major = h.version_major;
+            stats.minor = h.version_minor;
+            b.data().offset(remaining)
+        } else {
+            panic!("couldn't parse header");
+        }
+    };
+
+    // println!("consumed {} bytes", length);
+    b.consume(length);
+
+    // we will count the number of tag and use that and return value for the generator
+    let mut block_count = 1usize;
+    let mut consumed = length;
+    let mut last_incomplete_offset = 0;
+
+    loop {
+        // refill the buffer
+        let sz = f.read(b.space()).expect("should write");
+        b.fill(sz);
+        // println!("refill: {} more bytes, available data: {} bytes, consumed: {} bytes",
+        //          sz, b.available_data(), consumed);
+
+        // if there's no more available data in the buffer after a write, that means we reached
+        // the end of the file
+        if b.available_data() == 0 {
+            // println!("no more data to read or parse, stopping the reading loop");
+            break;
+        }
+
+        let needed: Option<Needed>;
+
+        // println!("{}", (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
+
+        match stats.pcap_type {
+            PcapType::Unknown => panic!("unknown file type"),
+            PcapType::Pcap => {
+                loop {
+                    let (length,_) = {
+                        // read block
+                        match pcap::parse_pcap_frame(b.data()) {
+                            Ok((remaining,packet)) => {
+                                block_count += 1;
+                                // eprintln!("parse_block ok, count {}", block_count);
+                                // println!("parsed packet: {:?}", packet);
+                                stats.num_packets += 1;
+                                stats.num_bytes += packet.header.caplen as u64;
+                                (b.data().offset(remaining), packet)
+                            },
+                            // `Incomplete` means the nom parser does not have enough data to decide,
+                            // so we wait for the next refill and then retry parsing
+                            Err(nom::Err::Incomplete(n)) => {
+                                // println!("not enough data, needs a refill: {:?}", n);
+
+                                needed = Some(n);
+                                break;
+                            },
+
+                            // stop on an error. Maybe something else than a panic would be nice
+                            Err(nom::Err::Failure(e)) => {
+                                panic!("parse failure: {:?}", e);
+                            },
+
+                            // stop on an error. Maybe something else than a panic would be nice
+                            Err(nom::Err::Error(_e)) => {
+                                // panic!("parse error: {:?}", e);
+                                eprintln!("parse error");
+                                println!("{}", (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
+                                panic!("parse error");
+                            },
+                        }
+                    };
+
+                    // println!("consuming {} of {} bytes", length, b.available_data());
+                    b.consume(length);
+                    consumed += length;
                 }
             }
-            // 2. check for extra bytes
-            if rem.len() > 0 {
-                println!("Extra bytes after PCAPNG structure ({} bytes)", rem.len());
+            PcapType::PcapNG => {
+                loop {
+                    let (length,_) = {
+                        // read block
+                        match pcapng::parse_block(b.data()) {
+                            Ok((remaining,block)) => {
+                                block_count += 1;
+                                // eprintln!("parse_block ok, count {}", block_count);
+                                // println!("parsed block: {:?}", block);
+                                match block {
+                                    Block::SectionHeader(ref _hdr) => {
+                                        eprintln!("warning: new section header block");
+                                    },
+                                    Block::InterfaceDescription(ref ifdesc) => {
+                                        stats.link_type = Linktype(ifdesc.linktype as i32);
+                                    },
+                                    Block::EnhancedPacket(ref p) => {
+                                        stats.num_packets += 1;
+                                        stats.num_bytes += p.caplen as u64;
+                                    },
+                                    _ => (),
+                                }
+                                (b.data().offset(remaining), block)
+                            },
+                            // `Incomplete` means the nom parser does not have enough data to decide,
+                            // so we wait for the next refill and then retry parsing
+                            Err(nom::Err::Incomplete(n)) => {
+                                // println!("not enough data, needs a refill: {:?}", n);
+
+                                needed = Some(n);
+                                break;
+                            },
+
+                            // stop on an error. Maybe something else than a panic would be nice
+                            Err(nom::Err::Failure(e)) => {
+                                panic!("parse failure: {:?}", e);
+                            },
+
+                            // stop on an error. Maybe something else than a panic would be nice
+                            Err(nom::Err::Error(_e)) => {
+                                // panic!("parse error: {:?}", e);
+                                eprintln!("parse error");
+                                println!("{}", (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
+                                panic!("parse error");
+                            },
+                        }
+                    };
+
+                    // println!("consuming {} of {} bytes", length, b.available_data());
+                    b.consume(length);
+                    consumed += length;
+                }
             }
-            // XXX end of checks
-        },
-        _ => (),
+        }
+
+        if let Some(Needed::Size(sz)) = needed {
+            if sz > b.capacity() {
+                // println!("growing buffer capacity from {} bytes to {} bytes", capacity, capacity*2);
+                capacity = (capacity * 3) / 2;
+                if capacity > buffer_max_size {
+                    panic!("requesting capacity {} over buffer_max_size {}", capacity, buffer_max_size);
+                }
+                b.grow(capacity);
+            } else {
+                // eprintln!("incomplete, but less missing bytes {} than buffer size {} consumed {}", sz, capacity, consumed);
+                if last_incomplete_offset == consumed {
+                    eprintln!("seems file is truncated, exiting");
+                    break;
+                }
+                last_incomplete_offset = consumed;
+            }
+        }
     }
 
-    // { // XXX
-    //     match parse_section(&buffer) {
-    //         IResult::Done(rem, section) => {
-    //             println!("{:?}", section);
-    //             if !rem.is_empty() {
-    //                 println!(" !!! rem not empty, probably more sections to parse");
-    //             }
-    //             for interface in section.iter_interfaces() {
-    //                 println!("interface , header={:?}", interface.header);
-    //             }
-    //             for packet in section.iter_packets() {
-    //                 println!("packet: caplen={} len={} ts={}.{}", packet.header.caplen, packet.header.len, packet.header.ts_sec, packet.header.ts_usec);
-    //                 //println!("packet: {:?}", packet);
-    //             }
-    //             let v = section.sorted_by_timestamp();
-    //             assert_eq!(v.iter().count(), section.iter_packets().count());
-    //         },
-    //         e => println!("parse_section failed: {:?}", e),
-    //     }
-    // } // XXX
+    let _ = block_count;
+    let _ = consumed;
 
-    if verbose {
-        println!("Stats: {:?}", stats);
-        println!("Done.");
-    }
+    Ok(stats)
 }

@@ -20,7 +20,8 @@ path = "src/lib.rs"
 
 [dependencies]
 nom = "4.0"
-pcap-parser = "0.2"
+pcap-parser = "0.3"
+circular = "0.2.0"
 
 [dependencies.clap]
 version = "2"
