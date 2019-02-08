@@ -21,12 +21,9 @@ extern crate nom;
 use nom::HexDisplay;
 use nom::{Needed,Offset};
 
-#[derive(Debug,PartialEq,Eq)]
-enum PcapType {
-    Unknown,
-    Pcap,
-    PcapNG
-}
+extern crate pcap_tools;
+use pcap_tools::common;
+use common::PcapType;
 
 #[derive(Debug)]
 struct Stats {
@@ -117,13 +114,6 @@ fn main() {
             println!("Done.");
         }
     }
-
-    let mut buffer = Vec::new();
-    match file.read_to_end(&mut buffer) {
-        Err(why) => panic!("couldn't open {}: {}", display,
-                           why.description()),
-        Ok(_) => (),
-    };
 }
 
 fn pcap_get_stats<R:Read>(f: &mut R) -> Result<Stats,&'static str> {
