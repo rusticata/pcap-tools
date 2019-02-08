@@ -7,6 +7,9 @@ license = "MIT/Apache-2.0"
 homepage = "https://github.com/rusticata/pcap-tools"
 repository = "https://github.com/rusticata/pcap-tools.git"
 
+readme = "README.md"
+categories = ["network-programming"]
+
 [[bin]]
 name = "pcap-rewrite"
 path = "src/pcap-rewrite/main.rs"
