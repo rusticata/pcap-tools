@@ -10,6 +10,15 @@ repository = "https://github.com/rusticata/pcap-tools.git"
 readme = "README.md"
 categories = ["network-programming"]
 
+include = [
+  "LICENSE-*",
+  ".gitignore",
+  ".travis.yml",
+  "Cargo.toml",
+  "src/*.rs",
+  "src/*/*.rs"
+]
+
 [[bin]]
 name = "pcap-rewrite"
 path = "src/pcap-rewrite/main.rs"
