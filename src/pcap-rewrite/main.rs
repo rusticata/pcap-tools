@@ -287,10 +287,10 @@ fn get_linktype_parse_fn(link_type:Linktype) -> Option<for<'a> fn (&'a Packet) -
 {
     // See http://www.tcpdump.org/linktypes.html
     let f : Option<for<'a> fn (&'a Packet) -> &'a[u8]> = match link_type {
-        // Linktype(0) => get_data_null,
-        // Linktype(1) => get_data_ethernet,
-        // Linktype(113) => get_data_linux_cooked,
-        Linktype(228)   => Some(common::get_data_raw),
+        Linktype(0)     => Some(get_data_null),
+        Linktype(1)     => Some(get_data_ethernet),
+        Linktype(113)   => Some(get_data_linux_cooked),
+        Linktype(228)   => Some(get_data_raw),
         Linktype::NFLOG => Some(pcap_parser::get_data_nflog),
         _ => None
     };

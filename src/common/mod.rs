@@ -1,5 +1,9 @@
 use pcap_parser::*;
 
+mod data;
+
+pub use crate::common::data::*;
+
 use nom::le_u64;
 
 #[derive(Debug,PartialEq,Eq)]
@@ -39,12 +43,6 @@ pub fn try_parse_file<'a>(input: &'a[u8]) -> Result<Box<Capture + 'a>,Error> {
         _               => ()
     }
     Err(Error)
-}
-
-pub fn get_data_raw<'a>(packet: &'a Packet) -> &'a[u8] {
-    // debug!("data.len: {}, caplen: {}", packet.data.len(), packet.header.caplen);
-    let maxlen = packet.header.caplen as usize;
-    &packet.data[..maxlen]
 }
 
 pub fn pcapng_build_interface<'a>(idb: &'a InterfaceDescriptionBlock<'a>) -> InterfaceInfo {
