@@ -16,6 +16,7 @@ use std::process;
 extern crate pcap_parser;
 
 use pcap_parser::*;
+use pcap_parser::data::*;
 // use pcap_parser::Capture;
 
 extern crate nom;
@@ -95,7 +96,7 @@ fn pcap_convert<R:Read, W:Write>(from: &mut R, to:&mut W) -> Result<(),&'static 
         num_packets: 0,
         num_bytes: 0,
     };
-    let mut parse_data : for<'a> fn (&'a Packet) -> &'a[u8] = common::get_data_raw;
+    let mut parse_data : for<'a> fn (&'a Packet) -> &'a[u8] = get_data_raw;
 
 
     let (length,in_pcap_type) = {
@@ -291,7 +292,7 @@ fn get_linktype_parse_fn(link_type:Linktype) -> Option<for<'a> fn (&'a Packet) -
         Linktype(1)     => Some(get_data_ethernet),
         Linktype(113)   => Some(get_data_linux_cooked),
         Linktype(228)   => Some(get_data_raw),
-        Linktype::NFLOG => Some(pcap_parser::get_data_nflog),
+        Linktype::NFLOG => Some(get_data_nflog),
         _ => None
     };
     f

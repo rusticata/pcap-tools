@@ -1,9 +1,5 @@
 use pcap_parser::*;
 
-mod data;
-
-pub use crate::common::data::*;
-
 use nom::le_u64;
 
 #[derive(Debug,PartialEq,Eq)]
