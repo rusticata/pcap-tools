@@ -25,8 +25,7 @@ use nom::{Needed,Offset};
 
 extern crate pcap_tools;
 
-use pcap_tools::common;
-use common::*;
+use pcap_tools::common::*;
 
 #[derive(Debug)]
 struct Stats {
@@ -284,6 +283,10 @@ fn pcap_convert<R:Read, W:Write>(from: &mut R, to:&mut W) -> Result<(),&'static 
     Ok(())
 }
 
+fn wrap_get_data_nflog<'a>(packet: &'a Packet) -> &'a[u8] {
+    get_data_nflog(packet).expect("extract data from nflog packet")
+}
+
 fn get_linktype_parse_fn(link_type:Linktype) -> Option<for<'a> fn (&'a Packet) -> &'a[u8]>
 {
     // See http://www.tcpdump.org/linktypes.html
@@ -292,7 +295,7 @@ fn get_linktype_parse_fn(link_type:Linktype) -> Option<for<'a> fn (&'a Packet) -
         Linktype(1)     => Some(get_data_ethernet),
         Linktype(113)   => Some(get_data_linux_cooked),
         Linktype(228)   => Some(get_data_raw),
-        Linktype::NFLOG => Some(get_data_nflog),
+        Linktype::NFLOG => Some(wrap_get_data_nflog),
         _ => None
     };
     f
