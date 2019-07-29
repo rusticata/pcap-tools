@@ -1,31 +1,24 @@
+extern crate pcap_tools;
+use pcap_tools::common::*;
+
 extern crate clap;
-use clap::{Arg,App,crate_version};
-
-extern crate circular;
-
-use circular::Buffer;
-use std::io::{Read,Write};
-
-use std::error::Error;
-use std::fs::File;
-use std::path::Path;
+use clap::{crate_version, App, Arg};
 
 use std::cmp::min;
+use std::error::Error;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::Path;
 use std::process;
 
 extern crate pcap_parser;
 
-use pcap_parser::*;
 use pcap_parser::data::*;
+use pcap_parser::*;
 // use pcap_parser::Capture;
 
 extern crate nom;
-use nom::HexDisplay;
-use nom::{Needed,Offset};
-
-extern crate pcap_tools;
-
-use pcap_tools::common::*;
+use nom::ErrorKind;
 
 #[derive(Debug)]
 struct Stats {
@@ -38,18 +31,24 @@ fn main() {
         .version(crate_version!())
         .author("Pierre Chifflier")
         .about("Rewrite Pcap file from one format to another")
-        .arg(Arg::with_name("verbose")
-             .help("Be verbose")
-             .short("v")
-             .long("verbose"))
-        .arg(Arg::with_name("INPUT")
-             .help("Input file name")
-             .required(true)
-             .index(1))
-        .arg(Arg::with_name("OUTPUT")
-             .help("Output file name")
-             .required(true)
-             .index(2))
+        .arg(
+            Arg::with_name("verbose")
+                .help("Be verbose")
+                .short("v")
+                .long("verbose"),
+        )
+        .arg(
+            Arg::with_name("INPUT")
+                .help("Input file name")
+                .required(true)
+                .index(1),
+        )
+        .arg(
+            Arg::with_name("OUTPUT")
+                .help("Output file name")
+                .required(true)
+                .index(2),
+        )
         .get_matches();
 
     let input_filename = matches.value_of("INPUT").unwrap();
@@ -66,16 +65,15 @@ fn main() {
         Err(why) => {
             eprintln!("couldn't open {}: {}", display, why.description());
             process::exit(1);
-        },
+        }
         Ok(file) => file,
     };
-
 
     let p = Path::new(&output_filename);
     let mut file_dest = File::create(&p).unwrap();
 
     match pcap_convert(&mut file, &mut file_dest) {
-        Ok(_)  => (),
+        Ok(_) => (),
         Err(e) => {
             eprintln!("pcap rewrite failed: {}", e);
             process::exit(1);
@@ -83,199 +81,164 @@ fn main() {
     }
 }
 
-fn pcap_convert<R:Read, W:Write>(from: &mut R, to:&mut W) -> Result<(),&'static str> {
-    let mut capacity = 16384;
-    let buffer_max_size = 65536;
-    let mut b = Buffer::with_capacity(capacity);
-    let sz = from.read(b.space()).or(Err("unable to read data"))?;
-    b.fill(sz);
-    // println!("write {:#?}", sz);
+fn pcap_convert<R: Read, W: Write>(from: &mut R, to: &mut W) -> Result<(), &'static str> {
+    let capacity = 65536;
+    let mut interfaces = Vec::new();
+    let mut reader = pcap_parser::create_reader(capacity, from).or(Err("Error creating reader"))?;
+    let (offset, block) = reader.next().or(Err("Error reading file header"))?;
+    let in_pcap_type;
+    let in_pcap_big_endian;
+    match block {
+        PcapBlockOwned::NG(Block::SectionHeader(ref shb)) => {
+            in_pcap_type = PcapType::PcapNG;
+            // stats.major = shb.major_version;
+            // stats.minor = shb.minor_version;
+            in_pcap_big_endian = shb.is_bigendian();
+            // for opt in &shb.options {
+            //     match opt.code {
+            //         OptionCode::ShbHardware => {
+            //             let s = String::from_utf8_lossy(opt.value);
+            //             stats.shb_hardware = Some(String::from(s));
+            //         },
+            //         OptionCode::ShbOs => {
+            //             let s = String::from_utf8_lossy(opt.value);
+            //             stats.shb_os = Some(String::from(s));
+            //         },
+            //         OptionCode::ShbUserAppl => {
+            //             let s = String::from_utf8_lossy(opt.value);
+            //             stats.shb_userappl = Some(String::from(s));
+            //         },
+            //         _ => ()
+            //     }
+            // }
+        }
+        PcapBlockOwned::LegacyHeader(ref hdr) => {
+            let if_info = InterfaceInfo {
+                link_type: hdr.network,
+                if_tsresol: 0,
+                if_tsoffset: 0,
+                snaplen: hdr.snaplen,
+            };
+            interfaces.push(if_info);
+            in_pcap_type = PcapType::Pcap;
+            // stats.link_type = hdr.network;
+            // stats.major = hdr.version_major;
+            // stats.minor = hdr.version_minor;
+            in_pcap_big_endian = hdr.is_bigendian();
+        }
+        _ => unreachable!(),
+    };
+    reader.consume(offset);
 
-    let mut stats = Stats{
+    let mut last_incomplete_index = 0;
+    let mut block_count = 1usize;
+    let mut stats = Stats {
         num_packets: 0,
         num_bytes: 0,
     };
-    let mut parse_data : for<'a> fn (&'a Packet) -> &'a[u8] = get_data_raw;
-
-
-    let (length,in_pcap_type) = {
-        if let Ok((remaining,_h)) = pcapng::parse_sectionheaderblock(b.data()) {
-            (b.data().offset(remaining), PcapType::PcapNG)
-        } else if let Ok((remaining,h)) = pcap::parse_pcap_header(b.data()) {
-            let link_type = Linktype(h.network);
-            parse_data = get_linktype_parse_fn(link_type).ok_or("could not find function to decode linktype")?;
-            (b.data().offset(remaining), PcapType::Pcap)
-        } else {
-            return Err("couldn't parse input file header")
-        }
-    };
-
-    // println!("consumed {} bytes", length);
-    b.consume(length);
 
     let snaplen = 65535; // XXX
     let written = pcap_write_header(to, snaplen)?;
     stats.num_bytes += written as u64;
 
-    let mut block_count = 1usize;
-    let mut consumed = length;
-    let mut last_incomplete_offset = 0;
-
     loop {
-        // refill the buffer
-        let sz = from.read(b.space()).or(Err("unable to read data"))?;
-        b.fill(sz);
-        // println!("refill: {} more bytes, available data: {} bytes, consumed: {} bytes",
-        //          sz, b.available_data(), consumed);
-
-        // if there's no more available data in the buffer after a write, that means we reached
-        // the end of the file
-        if b.available_data() == 0 {
-            // println!("no more data to read or parse, stopping the reading loop");
-            break;
-        }
-
-        let needed: Option<Needed>;
-
-        // println!("{}", (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
-
-        match in_pcap_type {
-            PcapType::Unknown => { return Err("unknown file type"); },
-            PcapType::Pcap => {
-                loop {
-                    let length = {
-                        // read block
-                        match pcap::parse_pcap_frame(b.data()) {
-                            Ok((remaining,packet)) => {
-                                block_count += 1;
-                                // eprintln!("parse_block ok, count {}", block_count);
-                                // println!("parsed packet: {:?}", packet);
-                                let data = {
-                                    let data = parse_data(&packet);
-                                    if data.len() > snaplen as usize {
-                                        eprintln!("truncating block {} to {} bytes", block_count, snaplen);
-                                        &data[..snaplen as usize]
-                                    } else {
-                                        data
-                                    }
-                                };
-                                let written = pcap_write_packet(to, &packet, data)?;
-                                stats.num_packets += 1;
-                                stats.num_bytes += written as u64;
-                                b.data().offset(remaining)
-                            },
-                            Err(nom::Err::Incomplete(n)) => {
-                                // println!("not enough data, needs a refill: {:?}", n);
-
-                                needed = Some(n);
-                                break;
-                            },
-                            Err(nom::Err::Failure(e)) => {
-                                eprintln!("parse failure: {:?}", e);
-                                return Err("parse error");
-                            },
-                            Err(nom::Err::Error(_e)) => {
-                                // panic!("parse error: {:?}", e);
-                                eprintln!("parse error");
-                                eprintln!("{}", (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
-                                return Err("parse error");
-                            },
-                        }
-                    };
-
-                    // println!("consuming {} of {} bytes", length, b.available_data());
-                    b.consume(length);
-                    consumed += length;
-                }
+        match reader.next() {
+            Ok((offset, block)) => {
+                block_count += 1;
+                match block {
+                    PcapBlockOwned::NG(Block::SectionHeader(ref _shb)) => {
+                        interfaces = Vec::new();
+                        reader.consume(offset);
+                        continue;
+                    }
+                    PcapBlockOwned::NG(Block::InterfaceDescription(ref idb)) => {
+                        let if_info = pcapng_build_interface(idb);
+                        interfaces.push(if_info);
+                        reader.consume(offset);
+                        continue;
+                    }
+                    PcapBlockOwned::NG(Block::EnhancedPacket(ref epb)) => {
+                        assert!((epb.if_id as usize) < interfaces.len());
+                        let if_info = &interfaces[epb.if_id as usize];
+                        let written = pcap_write_epb(to, epb, &if_info, snaplen)?;
+                        stats.num_packets += 1;
+                        stats.num_bytes += written;
+                    }
+                    PcapBlockOwned::NG(Block::SimplePacket(ref spb)) => {
+                        assert!(interfaces.len() > 0);
+                        // let if_info = &interfaces[0];
+                        let blen = (spb.block_len1 - 16) as usize;
+                        // let data = pcap_parser::data::get_packetdata(spb.data, if_info.link_type, blen)
+                        //     .expect("Parsing PacketData failed");
+                        stats.num_packets += 1;
+                        stats.num_bytes += blen as u64;
+                    }
+                    PcapBlockOwned::LegacyHeader(ref hdr) => {
+                        eprintln!("Legacy pcap: second header ?!");
+                        let if_info = InterfaceInfo {
+                            link_type: hdr.network,
+                            if_tsoffset: 0,
+                            if_tsresol: 6,
+                            snaplen: hdr.snaplen,
+                        };
+                        interfaces.push(if_info);
+                        reader.consume(offset);
+                        continue;
+                    }
+                    PcapBlockOwned::Legacy(ref b) => {
+                        assert!(interfaces.len() > 0);
+                        // let if_info = &interfaces[0];
+                        // let blen = b.caplen as usize;
+                        // let data = pcap_parser::data::get_packetdata(b.data, if_info.link_type, blen)
+                        //     .expect("Parsing PacketData failed");
+                        //                             let data = {
+                        //                                 let data = parse_data(&packet);
+                        //                                 if data.len() > snaplen as usize {
+                        //                                     eprintln!("truncating block {} to {} bytes", block_count, snaplen);
+                        //                                     &data[..snaplen as usize]
+                        //                                 } else {
+                        //                                     data
+                        //                                 }
+                        //                             };
+                        let written = pcap_write_legacy_block(to, b, snaplen)?;
+                        stats.num_packets += 1;
+                        stats.num_bytes += written;
+                    }
+                    PcapBlockOwned::NG(Block::InterfaceStatistics(_))
+                    | PcapBlockOwned::NG(Block::NameResolution(_)) => {
+                        // XXX just ignore
+                        reader.consume(offset);
+                        continue;
+                    }
+                    _ => {
+                        eprintln!("unsupported block");
+                        reader.consume(offset);
+                        continue;
+                    }
+                };
+                reader.consume(offset);
+                continue;
             }
-            PcapType::PcapNG => {
-                let mut if_info = InterfaceInfo::new();
-                loop {
-                    let length = {
-                        // read block
-                        match pcapng::parse_block(b.data()) {
-                            Ok((remaining,block)) => {
-                                block_count += 1;
-                                // eprintln!("parse_block ok, count {}", block_count);
-                                // println!("parsed block: {:?}", block);
-                                match block {
-                                    Block::SectionHeader(ref _hdr) => {
-                                        eprintln!("warning: new section header block");
-                                    },
-                                    Block::InterfaceDescription(ref ifdesc) => {
-                                        if_info = pcapng_build_interface(ifdesc);
-                                        parse_data = get_linktype_parse_fn(if_info.link_type).ok_or("could not find function to decode linktype")?;
-                                    },
-                                    Block::SimplePacket(_) |
-                                    Block::EnhancedPacket(_) => {
-                                        let packet = pcapng_build_packet(&if_info, &block).ok_or("could not convert block to packet")?;
-                                        let data = {
-                                            let data = parse_data(&packet);
-                                            if data.len() > snaplen as usize {
-                                                eprintln!("truncating block {} to {} bytes", block_count, snaplen);
-                                                &data[..snaplen as usize]
-                                            } else {
-                                                data
-                                            }
-                                        };
-                                        let written = pcap_write_packet(to, &packet, data)?;
-                                        stats.num_packets += 1;
-                                        stats.num_bytes += written as u64;
-                                    },
-                                    _ => (),
-                                }
-                                b.data().offset(remaining)
-                            },
-                            Err(nom::Err::Incomplete(n)) => {
-                                // println!("not enough data, needs a refill: {:?}", n);
-
-                                needed = Some(n);
-                                break;
-                            },
-                            Err(nom::Err::Failure(e)) => {
-                                eprintln!("parse failure: {:?}", e);
-                                return Err("parse error");
-                            },
-                            Err(nom::Err::Error(_e)) => {
-                                // panic!("parse error: {:?}", e);
-                                eprintln!("parse error");
-                                eprintln!("{}", (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
-                                return Err("parse error");
-                            },
-                        }
-                    };
-
-                    // println!("consuming {} of {} bytes", length, b.available_data());
-                    b.consume(length);
-                    consumed += length;
-                }
-            }
-        }
-
-        if let Some(Needed::Size(sz)) = needed {
-            if sz > b.capacity() {
-                // println!("growing buffer capacity from {} bytes to {} bytes", capacity, capacity*2);
-                capacity = (capacity * 3) / 2;
-                if capacity > buffer_max_size {
-                    eprintln!("requesting capacity {} over buffer_max_size {}", capacity, buffer_max_size);
-                    return Err("buffer size too small");
-                }
-                b.grow(capacity);
-            } else {
-                // eprintln!("incomplete, but less missing bytes {} than buffer size {} consumed {}", sz, capacity, consumed);
-                if last_incomplete_offset == consumed {
-                    eprintln!("seems file is truncated, exiting");
+            Err(ErrorKind::Eof) => break,
+            Err(ErrorKind::Complete) => {
+                if last_incomplete_index == block_count {
+                    eprintln!("Could not read complete data block.");
+                    eprintln!("Hint: the reader buffer size may be too small, or the input file nay be truncated.");
                     break;
                 }
-                last_incomplete_offset = consumed;
+                last_incomplete_index = block_count;
+                // refill the buffer
+                eprintln!("refill");
+                reader.refill()?;
+                continue;
             }
+            Err(e) => panic!("error while reading: {:?}", e),
         }
     }
 
-
-
     let _ = block_count;
-    let _ = consumed;
+    let _ = in_pcap_type;
+    let _ = in_pcap_big_endian;
 
     eprintln!("Done.");
     eprintln!("stats: {:?}", stats);
@@ -283,44 +246,66 @@ fn pcap_convert<R:Read, W:Write>(from: &mut R, to:&mut W) -> Result<(),&'static 
     Ok(())
 }
 
-fn wrap_get_data_nflog<'a>(packet: &'a Packet) -> &'a[u8] {
-    get_data_nflog(packet).expect("extract data from nflog packet")
-}
-
-fn get_linktype_parse_fn(link_type:Linktype) -> Option<for<'a> fn (&'a Packet) -> &'a[u8]>
-{
-    // See http://www.tcpdump.org/linktypes.html
-    let f : Option<for<'a> fn (&'a Packet) -> &'a[u8]> = match link_type {
-        Linktype(0)     => Some(get_data_null),
-        Linktype(1)     => Some(get_data_ethernet),
-        Linktype(113)   => Some(get_data_linux_cooked),
-        Linktype(228)   => Some(get_data_raw),
-        Linktype::NFLOG => Some(wrap_get_data_nflog),
-        _ => None
-    };
-    f
-}
-
-fn pcap_write_header<W:Write>(to:&mut W, snaplen:u32) -> Result <usize,&'static str> {
+fn pcap_write_header<W: Write>(to: &mut W, snaplen: u32) -> Result<usize, &'static str> {
     let mut hdr = pcap_parser::PcapHeader::new();
     hdr.snaplen = snaplen;
-    hdr.network = 228; // DATALINK_RAWIPV4
-    let s = hdr.to_string();
+    hdr.network = Linktype::IPV4;
+    let s = hdr.to_vec();
     to.write(&s).or(Err("Couldn't write header"))?;
     Ok(s.len())
 }
 
-fn pcap_write_packet<W:Write>(to:&mut W, packet:&Packet, data:&[u8]) -> Result<usize,&'static str> {
-    let rec_hdr = pcap_parser::PacketHeader{
-        ts_sec: packet.header.ts_sec as u32,
-        ts_usec: packet.header.ts_usec as u32,
-        caplen: data.len() as u32, // packet.header.caplen,
-        len: data.len() as u32, // packet.header.len,
-    };
-    // debug!("rec_hdr: {:?}", rec_hdr);
-    // debug!("data (len={}): {}", data.len(), data.to_hex(16));
-    let s = rec_hdr.to_string();
-    let sz = to.write(&s).or(Err("write error"))? + to.write(&data).or(Err("write error"))?;
+fn pcap_write_legacy_block<W: Write>(
+    to: &mut W,
+    block: &LegacyPcapBlock,
+    snaplen: u32,
+) -> Result<u64, &'static str> {
+    // XXX truncate data to snaplen
+    let s = block.to_vec();
+    let sz = to.write(&s).or(Err("write error"))?;
 
-    Ok(sz)
+    Ok(sz as u64)
+}
+
+fn pcap_write_epb<W: Write>(
+    to: &mut W,
+    epb: &EnhancedPacketBlock,
+    if_info: &InterfaceInfo,
+    snaplen: u32,
+) -> Result<u64, &'static str> {
+    let (ts_sec, ts_frac, unit) = pcap_parser::build_ts(
+        epb.ts_high,
+        epb.ts_low,
+        if_info.if_tsoffset,
+        if_info.if_tsresol,
+    );
+    let unit = unit as u32; // XXX lossy cast
+    let ts_usec = if unit != MICROS_PER_SEC {
+        ts_frac / ((unit / MICROS_PER_SEC) as u32)
+    } else {
+        ts_frac
+    };
+    let pdata = pcap_parser::data::get_packetdata(epb.data, if_info.link_type, epb.caplen as usize)
+        .expect("Parsing PacketData failed");
+    let caplen = min(snaplen, epb.caplen) as usize;
+    let data = match pdata {
+        PacketData::L2(data) => &data[14..], // XXX this can fail
+        PacketData::L3(_, data) => data,
+        PacketData::L4(_, _) => unimplemented!(),
+        PacketData::Unsupported(_) => unimplemented!(),
+    };
+    // truncate data to snaplen
+    let data = &data[..caplen];
+    assert_eq!(caplen, data.len());
+    let b = LegacyPcapBlock {
+        ts_sec,
+        ts_usec,
+        caplen: caplen as u32,
+        origlen: epb.origlen,
+        data,
+    };
+    let s = b.to_vec();
+    let sz = to.write(&s).or(Err("write error"))?;
+
+    Ok(sz as u64)
 }

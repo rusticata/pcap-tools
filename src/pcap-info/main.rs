@@ -1,35 +1,28 @@
+extern crate pcap_tools;
+use pcap_tools::common::*;
+
 extern crate clap;
 use clap::{Arg,App,crate_version};
 
-extern crate circular;
-
-use circular::Buffer;
-use std::io::Read;
-
-use std::cmp::min;
 use std::error::Error;
-use std::fs::File;
-use std::path::Path;
-
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 
 extern crate pcap_parser;
 
 use pcap_parser::*;
 
 extern crate nom;
-use nom::HexDisplay;
-use nom::{Needed,Offset};
-
-extern crate pcap_tools;
-use pcap_tools::common;
-use common::PcapType;
+use nom::ErrorKind;
 
 #[derive(Debug)]
 struct Stats {
     pcap_type: PcapType,
     major: u16,
     minor: u16,
+    big_endian: bool,
     num_packets: u32,
     num_bytes: u64,
     link_type: Linktype,
@@ -44,6 +37,7 @@ impl Stats {
             pcap_type: PcapType::Unknown,
             major: 0,
             minor: 0,
+            big_endian: false,
             num_packets: 0,
             num_bytes: 0,
             link_type: Linktype(0),
@@ -119,27 +113,21 @@ fn main() {
 fn pcap_get_stats<R:Read>(f: &mut R) -> Result<Stats,&'static str> {
     let mut stats = Stats::new();
 
-    let mut capacity = 16384;
-    let buffer_max_size = 65536;
-    let mut b = Buffer::with_capacity(capacity);
-    let sz = f.read(b.space()).expect("should write");
-    b.fill(sz);
-    // println!("write {:#?}", sz);
-
-    let length = {
-        // parse the section header
-        let res = parse_sectionheaderblock(b.data());
-
-        // `available_data()` returns how many bytes can be read from the buffer
-        // `data()` returns a `&[u8]` of the current data
-        // `to_hex(_)` is a helper method of `nom::HexDisplay` to print a hexdump of a byte slice
-        // println!("data({} bytes):\n{}", b.available_data(), (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
-        if let Ok((remaining, h)) = res {
-            // println!("parsed header: {:?}", h);
+    let capacity = 65536;
+    let mut interfaces = Vec::new();
+    let mut reader = pcap_parser::create_reader(capacity, f)
+        .or(Err("Error creating reader"))
+        ?;
+    let (offset, block) = reader.next()
+        .or(Err("Error reading file header"))
+        ?;
+    match block {
+        PcapBlockOwned::NG(Block::SectionHeader(ref shb)) => {
             stats.pcap_type = PcapType::PcapNG;
-            stats.major = h.major_version;
-            stats.minor = h.minor_version;
-            for opt in h.options {
+            stats.major = shb.major_version;
+            stats.minor = shb.minor_version;
+            stats.big_endian = shb.is_bigendian();
+            for opt in &shb.options {
                 match opt.code {
                     OptionCode::ShbHardware => {
                         let s = String::from_utf8_lossy(opt.value);
@@ -156,168 +144,128 @@ fn pcap_get_stats<R:Read>(f: &mut R) -> Result<Stats,&'static str> {
                     _ => ()
                 }
             }
-
-            // `offset()` is a helper method of `nom::Offset` that can compare two slices and indicate
-            // how far they are from each other. The parameter of `offset()` must be a subset of the
-            // original slice
-            b.data().offset(remaining)
-        } else if let Ok((remaining,h)) = pcap::parse_pcap_header(b.data()) {
+        },
+        PcapBlockOwned::LegacyHeader(ref hdr) => {
+            let if_info = InterfaceInfo {
+                link_type: hdr.network,
+                if_tsresol: 0,
+                if_tsoffset: 0,
+                snaplen: hdr.snaplen,
+            };
+            interfaces.push(if_info);
             stats.pcap_type = PcapType::Pcap;
-            stats.link_type = Linktype(h.network);
-            stats.major = h.version_major;
-            stats.minor = h.version_minor;
-            b.data().offset(remaining)
-        } else {
-            panic!("couldn't parse header");
-        }
+            stats.link_type = hdr.network;
+            stats.major = hdr.version_major;
+            stats.minor = hdr.version_minor;
+            stats.big_endian = hdr.is_bigendian();
+        },
+        _ => unreachable!(),
     };
+    reader.consume(offset);
 
-    // println!("consumed {} bytes", length);
-    b.consume(length);
-
-    // we will count the number of tag and use that and return value for the generator
+    let mut last_incomplete_index = 0;
     let mut block_count = 1usize;
-    let mut consumed = length;
-    let mut last_incomplete_offset = 0;
+    let mut consumed = 0;
 
     loop {
-        // refill the buffer
-        let sz = f.read(b.space()).expect("should write");
-        b.fill(sz);
-        // println!("refill: {} more bytes, available data: {} bytes, consumed: {} bytes",
-        //          sz, b.available_data(), consumed);
-
-        // if there's no more available data in the buffer after a write, that means we reached
-        // the end of the file
-        if b.available_data() == 0 {
-            // println!("no more data to read or parse, stopping the reading loop");
-            break;
-        }
-
-        let needed: Option<Needed>;
-
-        // println!("{}", (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
-
-        match stats.pcap_type {
-            PcapType::Unknown => panic!("unknown file type"),
-            PcapType::Pcap => {
-                loop {
-                    let (length,_) = {
-                        // read block
-                        match pcap::parse_pcap_frame(b.data()) {
-                            Ok((remaining,packet)) => {
-                                block_count += 1;
-                                // eprintln!("parse_block ok, count {}", block_count);
-                                // println!("parsed packet: {:?}", packet);
-                                stats.num_packets += 1;
-                                stats.num_bytes += packet.header.caplen as u64;
-                                (b.data().offset(remaining), packet)
-                            },
-                            // `Incomplete` means the nom parser does not have enough data to decide,
-                            // so we wait for the next refill and then retry parsing
-                            Err(nom::Err::Incomplete(n)) => {
-                                // println!("not enough data, needs a refill: {:?}", n);
-
-                                needed = Some(n);
-                                break;
-                            },
-
-                            // stop on an error. Maybe something else than a panic would be nice
-                            Err(nom::Err::Failure(e)) => {
-                                panic!("parse failure: {:?}", e);
-                            },
-
-                            // stop on an error. Maybe something else than a panic would be nice
-                            Err(nom::Err::Error(_e)) => {
-                                // panic!("parse error: {:?}", e);
-                                eprintln!("parse error");
-                                println!("{}", (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
-                                panic!("parse error");
-                            },
-                        }
-                    };
-
-                    // println!("consuming {} of {} bytes", length, b.available_data());
-                    b.consume(length);
-                    consumed += length;
-                }
-            }
-            PcapType::PcapNG => {
-                loop {
-                    let (length,_) = {
-                        // read block
-                        match pcapng::parse_block(b.data()) {
-                            Ok((remaining,block)) => {
-                                block_count += 1;
-                                // eprintln!("parse_block ok, count {}", block_count);
-                                // println!("parsed block: {:?}", block);
-                                match block {
-                                    Block::SectionHeader(ref _hdr) => {
-                                        eprintln!("warning: new section header block");
-                                    },
-                                    Block::InterfaceDescription(ref ifdesc) => {
-                                        stats.link_type = Linktype(ifdesc.linktype as i32);
-                                    },
-                                    Block::EnhancedPacket(ref p) => {
-                                        stats.num_packets += 1;
-                                        stats.num_bytes += p.caplen as u64;
-                                    },
-                                    _ => (),
-                                }
-                                (b.data().offset(remaining), block)
-                            },
-                            // `Incomplete` means the nom parser does not have enough data to decide,
-                            // so we wait for the next refill and then retry parsing
-                            Err(nom::Err::Incomplete(n)) => {
-                                // println!("not enough data, needs a refill: {:?}", n);
-
-                                needed = Some(n);
-                                break;
-                            },
-
-                            // stop on an error. Maybe something else than a panic would be nice
-                            Err(nom::Err::Failure(e)) => {
-                                panic!("parse failure: {:?}", e);
-                            },
-
-                            // stop on an error. Maybe something else than a panic would be nice
-                            Err(nom::Err::Error(_e)) => {
-                                // panic!("parse error: {:?}", e);
-                                eprintln!("parse error");
-                                println!("{}", (&b.data()[..min(b.available_data(), 128)]).to_hex(16));
-                                panic!("parse error");
-                            },
-                        }
-                    };
-
-                    // println!("consuming {} of {} bytes", length, b.available_data());
-                    b.consume(length);
-                    consumed += length;
-                }
-            }
-        }
-
-        if let Some(Needed::Size(sz)) = needed {
-            if sz > b.capacity() {
-                // println!("growing buffer capacity from {} bytes to {} bytes", capacity, capacity*2);
-                capacity = (capacity * 3) / 2;
-                if capacity > buffer_max_size {
-                    panic!("requesting capacity {} over buffer_max_size {}", capacity, buffer_max_size);
-                }
-                b.grow(capacity);
-            } else {
-                // eprintln!("incomplete, but less missing bytes {} than buffer size {} consumed {}", sz, capacity, consumed);
-                if last_incomplete_offset == consumed {
-                    eprintln!("seems file is truncated, exiting");
+        match reader.next() {
+            Ok((offset, block)) => {
+                block_count += 1;
+                match block {
+                    PcapBlockOwned::NG(Block::SectionHeader(ref _shb)) => {
+                        interfaces = Vec::new();
+                        consumed += offset;
+                        reader.consume(offset);
+                        continue;
+                    },
+                    PcapBlockOwned::NG(Block::InterfaceDescription(ref idb)) => {
+                        let if_info = pcapng_build_interface(idb);
+                        interfaces.push(if_info);
+                        consumed += offset;
+                        reader.consume(offset);
+                        continue;
+                    },
+                    PcapBlockOwned::NG(Block::EnhancedPacket(ref epb)) => {
+                        assert!((epb.if_id as usize) < interfaces.len());
+                        // let if_info = &interfaces[epb.if_id as usize];
+                        // let (ts_sec, ts_frac, unit) = pcap_parser::build_ts(epb.ts_high, epb.ts_low, 
+                        //                                                     if_info.if_tsoffset, if_info.if_tsresol);
+                        // let unit = unit as u32; // XXX lossy cast
+                        // let ts_usec = if unit != MICROS_PER_SEC {
+                        //     ts_frac/ ((unit / MICROS_PER_SEC) as u32) } else { ts_frac };
+                        // let data = pcap_parser::data::get_packetdata(epb.data, if_info.link_type, epb.caplen as usize)
+                        //     .expect("Parsing PacketData failed");
+                        stats.num_packets += 1;
+                        stats.num_bytes += epb.caplen as u64;
+                    },
+                    PcapBlockOwned::NG(Block::SimplePacket(ref spb)) => {
+                        assert!(interfaces.len() > 0);
+                        // let if_info = &interfaces[0];
+                        let blen = (spb.block_len1 - 16) as usize;
+                        // let data = pcap_parser::data::get_packetdata(spb.data, if_info.link_type, blen)
+                        //     .expect("Parsing PacketData failed");
+                        stats.num_packets += 1;
+                        stats.num_bytes += blen as u64;
+                    },
+                    PcapBlockOwned::LegacyHeader(ref hdr) => {
+                        eprintln!("Legacy pcap: second header ?!");
+                        let if_info = InterfaceInfo{
+                            link_type: hdr.network,
+                            if_tsoffset: 0,
+                            if_tsresol: 6,
+                            snaplen: hdr.snaplen,
+                        };
+                        interfaces.push(if_info);
+                        consumed += offset;
+                        reader.consume(offset);
+                        continue;
+                    },
+                    PcapBlockOwned::Legacy(ref b) => {
+                        assert!(interfaces.len() > 0);
+                        // let if_info = &interfaces[0];
+                        // let blen = b.caplen as usize;
+                        // let data = pcap_parser::data::get_packetdata(b.data, if_info.link_type, blen)
+                        //     .expect("Parsing PacketData failed");
+                        stats.num_packets += 1;
+                        stats.num_bytes += b.caplen as u64;
+                    },
+                    PcapBlockOwned::NG(Block::InterfaceStatistics(_)) |
+                        PcapBlockOwned::NG(Block::NameResolution(_)) => {
+                            // XXX just ignore
+                            consumed += offset;
+                            reader.consume(offset);
+                            continue;
+                        },
+                    _ => {
+                        eprintln!("unsupported block");
+                        consumed += offset;
+                        reader.consume(offset);
+                        continue;
+                    }
+                };
+                        consumed += offset;
+                reader.consume(offset);
+                continue;
+            },
+            Err(ErrorKind::Eof) => break,
+            Err(ErrorKind::Complete) => {
+                if last_incomplete_index == block_count {
+                    eprintln!("*** Could not read complete data block.");
+                    eprintln!("***     consumed: {} bytes", consumed);
+                    eprintln!("*** Hint: the reader buffer size may be too small, or the input file nay be truncated.");
                     break;
                 }
-                last_incomplete_offset = consumed;
-            }
+                last_incomplete_index = block_count;
+                // refill the buffer
+                eprintln!("refill");
+                reader.refill()?;
+                continue;
+            },
+            Err(e) => panic!("error while reading: {:?}", e),
         }
     }
 
     let _ = block_count;
-    let _ = consumed;
 
     Ok(stats)
 }

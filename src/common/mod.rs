@@ -2,6 +2,8 @@ use pcap_parser::*;
 
 use nom::le_u64;
 
+pub const MICROS_PER_SEC: u32 = 1_000_000;
+
 #[derive(Debug,PartialEq,Eq)]
 pub enum PcapType {
     Unknown,
@@ -13,6 +15,7 @@ pub struct InterfaceInfo {
     pub link_type: Linktype,
     pub if_tsresol: u8,
     pub if_tsoffset: u64,
+    pub snaplen: u32,
 }
 
 impl InterfaceInfo {
@@ -21,28 +24,15 @@ impl InterfaceInfo {
             link_type: Linktype(0),
             if_tsresol: 0,
             if_tsoffset: 0,
+            snaplen: 0,
         }
     }
 }
 
 pub struct Error;
 
-pub fn try_parse_file<'a>(input: &'a[u8]) -> Result<Box<Capture + 'a>,Error> {
-    // try pcapng
-    match parse_pcapng(input) {
-        Ok((_,capture)) => { return Ok(Box::new(capture)); },
-        _               => ()
-    }
-    // try pcap
-    match parse_pcap(input) {
-        Ok((_,capture)) => { return Ok(Box::new(capture)); },
-        _               => ()
-    }
-    Err(Error)
-}
-
 pub fn pcapng_build_interface<'a>(idb: &'a InterfaceDescriptionBlock<'a>) -> InterfaceInfo {
-    let link_type = Linktype(idb.linktype as i32);
+    let link_type = idb.linktype;
     // extract if_tsoffset and if_tsresol
     let mut if_tsresol : u8 = 6;
     let mut if_tsoffset : u64 = 0;
@@ -53,11 +43,8 @@ pub fn pcapng_build_interface<'a>(idb: &'a InterfaceDescriptionBlock<'a>) -> Int
             _ => (),
         }
     }
+    let snaplen = idb.snaplen;
     InterfaceInfo{
-        link_type, if_tsresol, if_tsoffset,
+        link_type, if_tsresol, if_tsoffset, snaplen
     }
-}
-
-pub fn pcapng_build_packet<'a>(if_info:&InterfaceInfo, block:&'a Block<'a>) -> Option<Packet<'a>> {
-    pcapng::packet_of_block_ref(block, if_info.if_tsoffset, if_info.if_tsresol)
 }
