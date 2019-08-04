@@ -1,6 +1,6 @@
 [package]
 name = "pcap-tools"
-version = "0.2.1"
+version = "0.2.0"
 description = "Tools for PCAP/PCAPNG files"
 authors = ["Pierre Chifflier <chifflier@wzdftpd.net>"]
 license = "MIT/Apache-2.0"
