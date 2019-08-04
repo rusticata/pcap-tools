@@ -11,14 +11,13 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process;
 
+extern crate nom;
 extern crate pcap_parser;
 
+use nom::error::ErrorKind;
 use pcap_parser::data::*;
 use pcap_parser::*;
 // use pcap_parser::Capture;
-
-extern crate nom;
-use nom::ErrorKind;
 
 #[derive(Debug)]
 struct Stats {
@@ -219,8 +218,8 @@ fn pcap_convert<R: Read, W: Write>(from: &mut R, to: &mut W) -> Result<(), &'sta
                 reader.consume(offset);
                 continue;
             }
-            Err(ErrorKind::Eof) => break,
-            Err(ErrorKind::Complete) => {
+            Err(PcapError::Eof) => break,
+            Err(PcapError::NomError(ErrorKind::Complete)) => {
                 if last_incomplete_index == block_count {
                     eprintln!("Could not read complete data block.");
                     eprintln!("Hint: the reader buffer size may be too small, or the input file nay be truncated.");
@@ -229,7 +228,7 @@ fn pcap_convert<R: Read, W: Write>(from: &mut R, to: &mut W) -> Result<(), &'sta
                 last_incomplete_index = block_count;
                 // refill the buffer
                 eprintln!("refill");
-                reader.refill()?;
+                reader.refill().or(Err("Refill error"))?;
                 continue;
             }
             Err(e) => panic!("error while reading: {:?}", e),

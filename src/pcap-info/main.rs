@@ -10,12 +10,11 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+extern crate nom;
 extern crate pcap_parser;
 
+use nom::error::ErrorKind;
 use pcap_parser::*;
-
-extern crate nom;
-use nom::ErrorKind;
 
 #[derive(Debug)]
 struct Stats {
@@ -247,8 +246,8 @@ fn pcap_get_stats<R:Read>(f: &mut R) -> Result<Stats,&'static str> {
                 reader.consume(offset);
                 continue;
             },
-            Err(ErrorKind::Eof) => break,
-            Err(ErrorKind::Complete) => {
+            Err(PcapError::Eof) => break,
+            Err(PcapError::NomError(ErrorKind::Complete)) => {
                 if last_incomplete_index == block_count {
                     eprintln!("*** Could not read complete data block.");
                     eprintln!("***     consumed: {} bytes", consumed);
@@ -258,7 +257,7 @@ fn pcap_get_stats<R:Read>(f: &mut R) -> Result<Stats,&'static str> {
                 last_incomplete_index = block_count;
                 // refill the buffer
                 eprintln!("refill");
-                reader.refill()?;
+                reader.refill().or(Err("Refill error"))?;
                 continue;
             },
             Err(e) => panic!("error while reading: {:?}", e),

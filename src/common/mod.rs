@@ -1,6 +1,5 @@
 use pcap_parser::*;
-
-use nom::le_u64;
+use std::convert::TryFrom;
 
 pub const MICROS_PER_SEC: u32 = 1_000_000;
 
@@ -39,7 +38,10 @@ pub fn pcapng_build_interface<'a>(idb: &'a InterfaceDescriptionBlock<'a>) -> Int
     for opt in idb.options.iter() {
         match opt.code {
             OptionCode::IfTsresol  => { if !opt.value.is_empty() { if_tsresol =  opt.value[0]; } },
-            OptionCode::IfTsoffset => { if opt.value.len() >= 8 { if_tsoffset = le_u64(opt.value).unwrap_or((&[],0)).1 /* LittleEndian::read_u64(opt.value) */; } },
+            OptionCode::IfTsoffset => {
+                if opt.value.len() >= 8 {
+                    let int_bytes = <[u8; 8]>::try_from(opt.value).expect("Convert bytes to u64");
+                    if_tsoffset = u64::from_le_bytes(int_bytes) /* LittleEndian::read_u64(opt.value) */; } },
             _ => (),
         }
     }
