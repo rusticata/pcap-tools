@@ -247,6 +247,7 @@ fn pcap_get_stats<R:Read>(f: &mut R) -> Result<Stats,&'static str> {
                 continue;
             },
             Err(PcapError::Eof) => break,
+            Err(PcapError::Incomplete) |
             Err(PcapError::NomError(ErrorKind::Complete)) => {
                 if last_incomplete_index == block_count {
                     eprintln!("*** Could not read complete data block.");

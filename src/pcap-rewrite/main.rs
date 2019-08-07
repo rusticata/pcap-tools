@@ -219,6 +219,7 @@ fn pcap_convert<R: Read, W: Write>(from: &mut R, to: &mut W) -> Result<(), &'sta
                 continue;
             }
             Err(PcapError::Eof) => break,
+            Err(PcapError::Incomplete) |
             Err(PcapError::NomError(ErrorKind::Complete)) => {
                 if last_incomplete_index == block_count {
                     eprintln!("Could not read complete data block.");
