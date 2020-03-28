@@ -250,7 +250,7 @@ fn pcap_write_header<W: Write>(to: &mut W, snaplen: u32) -> Result<usize, &'stat
     let mut hdr = pcap_parser::PcapHeader::new();
     hdr.snaplen = snaplen;
     hdr.network = Linktype::IPV4;
-    let s = hdr.to_vec();
+    let s = hdr.to_vec().or(Err("Pcap header serialization failed"))?;
     to.write(&s).or(Err("Couldn't write header"))?;
     Ok(s.len())
 }
@@ -261,7 +261,7 @@ fn pcap_write_legacy_block<W: Write>(
     snaplen: u32,
 ) -> Result<u64, &'static str> {
     // XXX truncate data to snaplen
-    let s = block.to_vec();
+    let s = block.to_vec_raw().or(Err("Pcap block serialization failed"))?;
     let sz = to.write(&s).or(Err("write error"))?;
 
     Ok(sz as u64)
@@ -304,7 +304,7 @@ fn pcap_write_epb<W: Write>(
         origlen: epb.origlen,
         data,
     };
-    let s = b.to_vec();
+    let s = b.to_vec_raw().or(Err("Pcap block serialization failed"))?;
     let sz = to.write(&s).or(Err("write error"))?;
 
     Ok(sz as u64)
